@@ -1,0 +1,54 @@
+# Load explicitly with: athena-broker --config config/default.toml
+# Environment overrides this file. Zero retention age disables that deletion.
+[server]
+port = 8080
+host = "0.0.0.0"
+log_level = "info"
+shutdown_grace_sec = 30
+
+[database]
+# Set DATABASE_URL in the environment to provide deployment credentials.
+# This password-free URL is only a syntax-valid local example.
+url = "postgres://athena@localhost:5432/athenadb"
+max_connections = 50
+min_connections = 1
+connect_timeout_sec = 10
+idle_timeout_sec = 300
+statement_timeout_ms = 15000
+lock_timeout_ms = 5000
+
+[subscriptions]
+worker_threads = 4
+poll_interval_ms = 250
+event_batch_size = 100
+request_timeout_sec = 10
+lease_duration_sec = 90
+max_attempts = 12
+retry_max_delay_sec = 300
+# Periodic snapshots are complete or deferred with a recorded error, never truncated.
+scheduler_max_entities = 10000
+scheduler_max_payload_bytes = 4194304
+scheduler_pending_job_limit = 100000
+# Optional additional trust roots for MQTT TLS, loaded once at startup.
+# mqtt_ca_file = "/etc/athena/mqtt-ca.pem"
+
+[limits]
+max_in_flight_writes = 128
+max_pending_events = 100000
+max_body_bytes = 4194304
+
+[jsonld]
+context_cache_size = 128
+max_concurrency = 16
+
+[security]
+allow_internal_endpoints = false
+
+[retention]
+interval_sec = 60
+batch_size = 1000
+delivered_seconds = 604800
+processed_events_seconds = 604800
+# Dead letters and temporal history are retained indefinitely unless opted in.
+dead_seconds = 0
+history_seconds = 0

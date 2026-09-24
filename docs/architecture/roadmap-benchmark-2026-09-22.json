@@ -1,0 +1,42 @@
+{
+  "date": "2026-09-22",
+  "environment": {
+    "host": "macOS ARM64",
+    "database": "PostgreSQL 16 / PostGIS 3.4, linux/amd64 emulated in Docker",
+    "build": "release",
+    "production_sizing": false
+  },
+  "initial_http_attempt": {
+    "deadline_seconds": 60,
+    "mutations": 1000,
+    "expected_notifications": 5000,
+    "delivered_at_inspection": 366,
+    "result": "deadline exceeded"
+  },
+  "http_after_claim_indexes": {
+    "batch_request_p50_ms": 47.477334000000006,
+    "batch_request_p95_ms": 175.092584,
+    "batch_size": 50,
+    "entities": 500,
+    "entity_mutations": 1000,
+    "history_instances": 1000,
+    "http_concurrency": 4,
+    "notification_latency_p50_ms": 3398.995,
+    "notification_latency_p95_ms": 5863.79,
+    "notification_workers": 4,
+    "notifications": 5000,
+    "pipeline_seconds": 6.537043666,
+    "receivers": 5,
+    "write_entities_per_second": 2484.9214469614094
+  },
+  "matching_component": {
+    "candidates_per_event": 10,
+    "subscriptions": 1000,
+    "entity_types": 100,
+    "events": 10000,
+    "events_per_second": 515388.6282797657,
+    "index_build_ms": 61.874667,
+    "matches": 100000,
+    "includes_database_or_http": false
+  }
+}

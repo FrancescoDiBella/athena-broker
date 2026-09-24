@@ -1,0 +1,30 @@
+[package]
+name = "athena-api"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+athena-http.workspace = true
+athena-model.workspace = true
+athena-jsonld.workspace = true
+athena-query.workspace = true
+athena-storage.workspace = true
+athena-subscription.workspace = true
+
+axum.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+url.workspace = true
+reqwest.workspace = true
+
+
+sqlx.workspace = true

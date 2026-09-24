@@ -1,0 +1,19 @@
+[package]
+name = "athena-storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+uuid.workspace = true
+athena-model.workspace = true
+athena-query.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

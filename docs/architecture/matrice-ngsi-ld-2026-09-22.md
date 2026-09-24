@@ -1,0 +1,51 @@
+# Athena: matrice preliminare delle capability NGSI-LD
+
+Data: 22 settembre 2026. Collegamento al [piano](piano-evoluzione-2026-09-22.md).
+
+Questa matrice deriva dall'ispezione di router, modelli, handler e repository. **Parziale** significa che esiste codice per una parte del comportamento; **assente** significa che non è stato trovato un percorso implementativo nello snapshot; **difettoso** indica un problema concreto. Nessuno di questi stati equivale a conformità verificata. Le richieste HTTP eseguite sono elencate nel [registro verifiche](verifiche-2026-09-22.md).
+
+Obiettivo: GS CIM 009 v1.9.1, con regressione del profilo v1.8.1 già dichiarato dal progetto. I gruppi sotto coprono modello, protocollo, provision, consumption, subscription, registrazioni, temporal e funzionalità estese. L'obbligatorietà di ogni singolo requisito va registrata per il profilo scelto; la presenza nella matrice non implica che sia obbligatorio per ogni broker. [Specifica ETSI v1.9.1](https://www.etsi.org/deliver/etsi_gs/CIM/001_099/009/01.09.01_60/gs_CIM009v010901p.pdf).
+
+| Capability | Stato osservato | Gap concreto / azione | Prova di accettazione proposta | Pacchetto |
+|---|---|---|---|---|
+| JSON-LD, Link, context inline, espansione/compattazione | Difettoso | Resolver presente ma non integrato; espansione superficiale; fallback semantico non affidabile | Scrittura con alias A, query con alias B equivalente; contesti remoti/inline/array e errori previsti | W02 |
+| Negoziazione HTTP e ProblemDetails | Difettoso | Risposte JSON fisse; Link del core sempre aggiunto; errori degli extractor non uniformati | Matrice Content-Type × Accept × Link × context, status e media type anche nei casi negativi | W01–W02 |
+| Property, Relationship, GeoProperty | Parziale | Strutture dedicate esistono ma il percorso entity usa Value con controlli limitati | Rifiuto di valori/tipi/cardinalità errati, round trip e mutazioni dei tre tipi | W02 |
+| LanguageProperty, VocabProperty, JsonProperty, ListProperty, ListRelationship | Assente come supporto semantico dedicato | Conservare un oggetto generico non ne valida né implementa serializzazione, query e mutazioni | Fixture per ciascun tipo, nested attributes e relativi formati di output | W02, W07, W11 |
+| Multi-type, multi-attribute, datasetId | Parziale/difettoso | Multi-type letto; array attributi accettati, ma update/delete/query non gestiscono le istanze in modo completo | Due dataset dello stesso attributo; operazione mirata lascia intatti gli altri | W02–W03, W05 |
+| System attributes, observedAt, scope | Parziale | Timestamp dell'entità presenti; metadati delle istanze e scope non governati uniformemente | Verifica di timestamp immutabili/modificabili, scope e aggiornamenti annidati | W02–W03 |
+| Normalized e simplified/keyValues | Parziale | Casi semplici implementati; istanze multiple e tipi avanzati non trasformati completamente | Output atteso per ogni tipo e dataset, con/senza sysAttrs | W02, W07 |
+| Concise, GeoJSON e altre rappresentazioni/opzioni | Assente o non dimostrato | Manca un livello di rappresentazione che gestisca le opzioni del profilo | Negoziazione e contenuto verificati con fixture versionate | W07, W11 |
+| Entity create/retrieve/delete | Parziale | Percorsi locali presenti; contesti e validazione incompleti; delete senza evento | Lifecycle completo, doppia create, not found, URI codificati, notifica del cambiamento previsto | W01–W03 |
+| Append/update/delete attributi | Difettoso | Merge JSONB superficiale; noOverwrite e proiezione location non coerenti in tutti i percorsi; dataset selector assente | Matrice attributo esistente/assente × overwrite × dataset; risultati parziali corretti | W01–W03 |
+| Partial attribute update, replace e merge entity/attribute | Assente come insieme completo di operazioni distinte | Il PATCH sull'entità non sostituisce la semantica delle operazioni mancanti | Contratti e route del profilo, incluse null/deletion e preservazione degli attributi non coinvolti | W02–W03, W07 |
+| Batch create/upsert/update/delete | Difettoso | Loop SQL, transazioni senza isolamento dell'errore; parsing comune non adatto a tutte le operazioni; notifiche da payload | Batch con validi, duplicati e invalidi: body/status corrispondono esattamente al DB e agli eventi | W01, W03, W06 |
+| Batch merge/query e operazioni aggiuntive del profilo | Assente | Le quattro route esistenti non coprono l'intera famiglia | Stessi risultati del percorso equivalente singolo; filtri e paginazione verificati | W07, W11 |
+| q: confronti, logica, liste/range/pattern | Parziale | AST esistente; cast sui valori eterogenei, URI/path e semantica SQL/matcher da allineare | Corpus comune con tipi misti, valori mancanti, liste, relazioni e annidamento; test su DB reale | W01, W07 |
+| geoQ | Parziale/difettoso | Parametri poco validati; geoproperty libera in SQL; indice/operatore da verificare; geoQ subscription ignorato | Tutte le relazioni del profilo, distanze valide/non valide, geometrie diverse e stessa selezione in query/subscription | W01, W07 |
+| Selettori id/type, scopeQ e filtri avanzati | Parziale | Filtri singoli basilari; scopeQ assente; opzioni non rappresentate nei DTO possono essere ignorate | Liste, combinazioni e selezione per scope/dataset; errori previsti per input non valido | W02, W07 |
+| Paginazione, count, ordinamento | Difettoso | Clamp silenzioso; ordine corrente senza tie-breaker; count federato solo locale; nessun contratto completo di link/cursore | Pagine/count coerenti sullo stesso insieme, limiti validati e gestione delle modifiche concorrenti documentata | W07, W09 |
+| Discovery di tipi e attributi | Assente | Non presenti route dedicate nel router | Informazioni coerenti con dati, tipi multipli, context e tenant | W07 |
+| Subscription lifecycle | Parziale/difettoso | ID richiesto dal modello nonostante un ramo generi ID vuoti; PATCH modifica solo description/status | Creazione senza ID quando ammessa, patch delle proprietà modificabili, validate e non-found | W02, W04, W08 |
+| Matching, watchedAttributes, q, geoQ, scadenza | Parziale | Match basilare e watched presenti; parse error q può essere ignorato; geoQ non applicato | Ogni evento confrontato con il corpus di selezione; invalid q rifiutato alla configurazione | W04, W07 |
+| Notification triggers, showChanges, formati e metadati | Parziale/assente | Payload base esistente; nessun modello completo del tipo di mutazione | Create/update/delete, differenze prima/dopo e proiezioni per opzione | W03–W04, W08 |
+| Throttling e timeInterval | Difettoso | Timestamp di throttling non sincronizzato nel modello; intervallo memorizzato senza scheduler | Clock controllato, più worker, riavvio, scadenza e aggiornamento della subscription | W04 |
+| HTTP e MQTT notification binding | HTTP parziale; MQTT assente | Un POST HTTP per tentativo; nessun transport MQTT nel workspace | Sink HTTP e broker MQTT reali di test, ack, reconnect, errori e header/metadati previsti | W04, W08 |
+| Persistenza e retry delle notifiche | Assente | Canale RAM e invii non persistenti | Crash dopo commit e dopo invio; evento conservato, duplicati riconoscibili, retry e DLQ misurabili | W03–W04 |
+| Registrazioni context source | Parziale | CRUD limitato; filtri lista ignorati; discovery passa per una lista limitata a 100 | Registrazioni oltre la prima pagina, patch, scadenze e criteri di matching | W09 |
+| Context source subscriptions | Assente | Nessuna route/modello operativo specifico | Cambi di registrazione generano notifiche secondo il profilo | W09, W11 |
+| Federazione e operazioni distribuite | Difettoso/incompleto | GET collection inoltra query vuota; no propagazione completa di context/tenant; merge e paginazione incompleti | Topologia a più broker con dati sovrapposti, loop, timeout e operazioni per modalità di registrazione | W09 |
+| Creazione e query temporali | Parziale/difettoso | Create diretto presente; storico ordinario non alimentato; perdita di tipi/metadati; query collection legata alle entità correnti | Import storico autonomo; auto-history del profilo IoT; query dopo delete corrente | W03, W05 |
+| Modifica/cancellazione temporale e instanceId | Assente | Router temporale espone solo POST collection e GET collection/ID | Lifecycle di entità, attributi e istanze temporali, dataset di default e nominati | W05 |
+| Filtri temporali e lastN | Difettoso | Due errori 500 riprodotti; between senza end non validato integralmente; lastN globale sulle righe | Ogni timeproperty; estremi temporali; più attributi/dataset; istanze limite | W01, W05 |
+| Aggregazioni temporali | Parziale/difettoso | Funzioni aggregate presenti, time bucket assente, count decodificato come float, group per solo attributo | Tipi numerici/non numerici, finestre vuote, precisione, dataset e aggrPeriodDuration | W01, W05 |
+| EntityMap, join, gestione JSON-LD contexts, source identity, snapshot | Assente come percorsi dedicati | Non presenti nel router analizzato | Un dossier requisito/test per ciascuna capability prima della dichiarazione di supporto | W11 |
+| Tenant e isolamento operativo | Assente nel percorso end-to-end | Header, repository, cache e chiavi DB non separano tenant | Stesso entity ID in tenant diversi; nessuna contaminazione in current/history/subscription/federation | W02, W10 |
+
+## Come trasformarla in un registro di conformità
+
+Per ogni riga dividere i comportamenti in requisiti atomici, evitando un unico booleano per l'intera feature. Campi minimi: `requirement_id`, `spec_version`, `clause`, `profile`, `mandatory_or_optional`, `operation`, `parameters`, `test_ids`, `status`, `limitations`, `last_result_artifact`.
+
+Collegare ogni requisito alla [suite ETSI](https://forge.etsi.org/rep/cim/ngsi-ld-test-suite) fissata a un commit compatibile; aggiungere test locali per crash, concorrenza e proprietà dello storage che non sono misurate dalla suite di protocollo. Separare `pass`, `fail`, `not_implemented`, `not_applicable` e `not_tested`; esporre il denominatore prima di pubblicare percentuali.
+
+Gli aspetti di durabilità, retry e tenant vanno descritti anche come caratteristiche operative del prodotto, senza attribuire indiscriminatamente tutte le scelte architetturali a obblighi normativi.

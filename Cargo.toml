@@ -1,0 +1,104 @@
+[workspace]
+members = [
+    "crates/athena-http",
+    "crates/athena-model",
+    "crates/athena-jsonld",
+    "crates/athena-query",
+    "crates/athena-storage",
+    "crates/athena-subscription",
+    "crates/athena-api",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Athena Broker Contributors"]
+license = "Apache-2.0"
+repository = "https://github.com/FrancescoDiBella/athena-broker"
+
+[workspace.dependencies]
+# Internal workspace crates
+athena-http = { path = "crates/athena-http" }
+athena-model = { path = "crates/athena-model" }
+athena-jsonld = { path = "crates/athena-jsonld" }
+athena-query = { path = "crates/athena-query" }
+athena-storage = { path = "crates/athena-storage" }
+athena-subscription = { path = "crates/athena-subscription" }
+athena-api = { path = "crates/athena-api" }
+
+# Async runtime & Web framework
+tokio = { version = "1.38", features = ["full"] }
+axum = { version = "0.7", features = ["macros", "json", "matched-path"] }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "compression-gzip", "timeout"] }
+
+# Serialization & JSON
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["raw_value"] }
+
+# Database & Storage
+sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "json", "uuid", "migrate"] }
+
+# Temporal & Identifiers
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.8", features = ["v4", "serde"] }
+
+# Networking & HTTP Client
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Utilities & Caching
+regex = "1.10"
+lru = "0.12"
+url = "2.5"
+async-trait = "0.1"
+thiserror = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[package]
+name = "athena-broker"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+athena-http.workspace = true
+athena-model.workspace = true
+athena-jsonld.workspace = true
+athena-query.workspace = true
+athena-storage.workspace = true
+athena-subscription.workspace = true
+athena-api.workspace = true
+
+tokio.workspace = true
+axum.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+toml = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "unwind"
+strip = true
+
+[dev-dependencies]
+rumqttc = { version = "0.25.1", default-features = false }
+athena-http.workspace = true
+sqlx.workspace = true
+reqwest.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+tower.workspace = true
+
+[[bench]]
+name = "core"
+harness = false

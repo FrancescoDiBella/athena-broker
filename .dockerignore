@@ -1,0 +1,12 @@
+target/
+artifacts/
+.env
+.env.*
+.git/
+.gitignore
+*.md
+tests/
+scripts/
+.idea/
+.vscode/
+scratch/

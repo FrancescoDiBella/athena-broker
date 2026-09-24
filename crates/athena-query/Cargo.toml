@@ -1,0 +1,14 @@
+[package]
+name = "athena-query"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+athena-model.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

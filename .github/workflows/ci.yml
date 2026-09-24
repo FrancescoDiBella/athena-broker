@@ -1,0 +1,32 @@
+name: broker-checks
+on: [push, pull_request]
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: athena_test
+        ports: ['55432:5432']
+        options: --health-cmd 'pg_isready -U postgres -d athena_test' --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: cargo test --locked --workspace
+      - run: cargo clippy --locked --workspace --all-targets
+      - run: cargo test --locked --test storage_integration --test operations_integration --test scheduling_integration -- --ignored --nocapture
+        env:
+          ATHENA_TEST_DATABASE_URL: postgres://postgres@localhost:55432/athena_test
+      - run: bash scripts/start-mqtt-test.sh
+      - run: cargo test --locked --test mqtt_integration -- --ignored --nocapture
+        env:
+          ATHENA_TEST_DATABASE_URL: postgres://postgres@localhost:55432/athena_test
+          ATHENA_TEST_MQTT_CA: ${{ github.workspace }}/artifacts/mqtt-test/ca.crt
+      - if: always()
+        run: docker stop athena-mqtt-integration || true
