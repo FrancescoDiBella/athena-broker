@@ -28,9 +28,9 @@ installation described in the [README](../README.md).
 | GET | `/`, `/ui` | Web explorer and test page |
 | GET | `/health`, `/ready`, `/metrics` | Process, dependency readiness and Prometheus-style metrics |
 | POST, GET | `/ngsi-ld/v1/entities` | Create entity, query entities |
-| GET, PATCH, DELETE | `/ngsi-ld/v1/entities/{id}` | Read, update, delete entity |
+| GET, PATCH, PUT, DELETE | `/ngsi-ld/v1/entities/{id}` | Read, update, replace, delete entity |
 | POST, PATCH | `/ngsi-ld/v1/entities/{id}/attrs` | Append or update attributes |
-| DELETE | `/ngsi-ld/v1/entities/{id}/attrs/{attr}` | Delete an attribute |
+| PATCH, PUT, DELETE | `/ngsi-ld/v1/entities/{id}/attrs/{attr}` | Patch, replace or delete an attribute dataset instance |
 | POST | `/ngsi-ld/v1/entityOperations/create` | Batch create |
 | POST | `/ngsi-ld/v1/entityOperations/upsert` | Batch upsert |
 | POST | `/ngsi-ld/v1/entityOperations/update` | Batch update |
@@ -46,11 +46,23 @@ installation described in the [README](../README.md).
 
 The entity query currently accepts `id`, `idPattern`, `type`, `q`, `georel`,
 `geometry`, `coordinates`, `geoproperty`, `attrs`, `limit`, `offset`, `options`,
-`count` and `local`. `local=true` suppresses federation. Query results with
-registrations have experimental merge/count/pagination semantics, so use `local=true`
-when a bounded local result is required. The temporal query accepts `id`, `type`,
+`count`, `local` and `splitEntities`. `local=true` suppresses federation. Federated
+queries merge datasets, deduplicate counts and apply pagination globally.
+`splitEntities=true` evaluates value/geo filters after merging source fragments.
+Upstream errors, partial responses, unstable pages and exhausted budgets return 502.
+See the [federation contract](architecture/query-mutation-2026-10-04.md#federation-contract)
+for limits and conflict precedence.
+
+The local temporal query accepts CSV `id`/`type`, `idPattern`, `q`, geo parameters, `count`,
 `timerel`, `timeAt`, `endTimeAt`, `timeproperty`, `attrs`, `lastN`, `aggrMethods`,
 `aggrPeriodDuration`, `limit` and `offset`; calendar periods are not supported.
+Temporal federation is not implemented: explicit `local=false` or
+`splitEntities=true` requests return 501. Omitting both selects local history.
+Temporal value/geo filters inspect instances inside the requested interval, including
+history-only or deleted entities. `after` includes `timeAt`; `between` excludes
+`endTimeAt`. `timeproperty=deletedAt` selects deletion history. Histories retain arrays
+for singleton attributes. Collection queries return an empty array for non-matching
+IDs and offer count and next/previous links. `limit=0` requires `count=true`.
 
 ## Minimal entity walkthrough
 
@@ -97,3 +109,21 @@ content type first rather than assume every error body has one schema.
 `/metrics` exposes request, queue, scheduler and database gauges; it has no built-in
 access control. Keep it behind an authenticated ingress outside local development.
 For migration and production limits see the [operations runbook](operations.md).
+
+## Attribute changes
+
+`PATCH /entities/{id}/attrs/{attr}` preserves omitted subattributes and targets the
+default dataset unless `datasetId` is supplied in the body. It cannot change the
+attribute type or delete required members. `PUT` at that path replaces the complete
+existing instance. `PUT /entities/{id}` requires `type` and replaces all entity data;
+an optional body `id` must match the resource URI. Missing targets return 404.
+
+`PATCH /entities/{id}/attrs` replaces supplied instances, adds missing ones and
+recognizes NGSI-LD null deletion for Property/Relationship/LanguageProperty values.
+Type fragments add entity types; scope fragments follow update/append semantics.
+`POST .../attrs?options=noOverwrite` preserves existing instances and returns 207
+with `updated` and `notUpdated` if some instances were skipped. Updates commit state,
+history and notification events atomically, including concurrent attribute patches.
+
+Batch containers must have 1–1,000 non-null items. Batch delete rejects the entire
+request if any item is not an absolute entity URI, before deleting any entity.

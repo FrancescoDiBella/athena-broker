@@ -15,7 +15,9 @@ cargo clippy --locked --workspace --all-targets
 ```
 
 CI runs these checks and then exercises isolated PostgreSQL and MQTT integration
-tests. Hosted CI results have not yet been used as production qualification.
+tests, including `roadmap_integration` for mutation, temporal geo and federated
+query edge cases. Hosted CI results are regression evidence, not production
+qualification.
 
 ## Isolated integration database
 

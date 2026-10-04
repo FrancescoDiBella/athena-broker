@@ -53,6 +53,29 @@ pub struct EntityQueryParams {
 
 #[async_trait]
 pub trait EntityRepository: Send + Sync {
+    async fn filter_snapshots(
+        &self,
+        entities: Vec<Entity>,
+        params: &EntityQueryParams,
+    ) -> Result<Vec<Entity>, StorageError>;
+    async fn mutate_attributes(
+        &self,
+        id: &str,
+        fragment: &serde_json::Value,
+        operation: athena_model::AttributeOperation,
+    ) -> Result<athena_model::UpdateResult, StorageError>;
+    async fn mutate_attribute(
+        &self,
+        id: &str,
+        attribute: &str,
+        fragment: &serde_json::Value,
+        replace: bool,
+    ) -> Result<(), StorageError>;
+    async fn replace_entity(
+        &self,
+        id: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), StorageError>;
     async fn create_entity(&self, entity: &Entity) -> Result<(), StorageError>;
     async fn get_entity_by_id(
         &self,
@@ -143,6 +166,12 @@ pub trait CsourceRepository: Send + Sync {
 
 #[async_trait]
 pub trait TemporalRepository: Send + Sync {
+    async fn count_temporal_entities(
+        &self,
+        entity_type: Option<&str>,
+        attrs: Option<&[String]>,
+        query: &TemporalQuery,
+    ) -> Result<i64, StorageError>;
     async fn delete_temporal(
         &self,
         id: &str,

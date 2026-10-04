@@ -77,6 +77,56 @@ impl PgEntityStore {
 
 #[async_trait]
 impl EntityRepository for PgEntityStore {
+    async fn filter_snapshots(
+        &self,
+        mut entities: Vec<Entity>,
+        params: &EntityQueryParams,
+    ) -> Result<Vec<Entity>, StorageError> {
+        let documents: Vec<Value> = entities
+            .iter()
+            .map(|e| serde_json::json!({"id":e.id,"attrs":e.attributes}))
+            .collect();
+        let mut sql = "SELECT id FROM jsonb_to_recordset($1::jsonb) AS snapshot(id text,attrs jsonb) WHERE TRUE".to_owned();
+        let mut bindings = Vec::new();
+        if let Some(attrs) = &params.attrs {
+            bindings.push(SqlParam::StringList(
+                attrs.iter().flat_map(|s| type_aliases(s)).collect(),
+            ));
+            sql.push_str(&format!(" AND attrs ?| ${}::text[]", bindings.len() + 1));
+        }
+        if let Some(q) = &params.q {
+            let compiled = SqlCompiler::compile_q(q, bindings.len() + 1);
+            sql.push_str(&format!(" AND {}", compiled.where_clause));
+            bindings.extend(compiled.params);
+        }
+        if let Some(geo) = &params.geo_q {
+            let compiled = SqlCompiler::compile_geo(geo, bindings.len() + 2);
+            sql.push_str(&format!(" AND {}", compiled.where_clause));
+            bindings.extend(compiled.params);
+        }
+        let mut query = sqlx::query_scalar::<_, String>(&sql).bind(serde_json::json!(documents));
+        for binding in bindings {
+            query = match binding {
+                SqlParam::String(v) => query.bind(v),
+                SqlParam::StringList(v) => query.bind(v),
+                SqlParam::Number(v) => query.bind(v),
+                SqlParam::Integer(v) => query.bind(v),
+                SqlParam::Boolean(v) => query.bind(v),
+                SqlParam::NumberList(v) => query.bind(v),
+            };
+        }
+        let ids: std::collections::HashSet<_> =
+            query.fetch_all(&self.pool).await?.into_iter().collect();
+        entities.retain(|entity| ids.contains(&entity.id));
+        if let Some(attrs) = &params.attrs {
+            for entity in &mut entities {
+                entity
+                    .attributes
+                    .retain(|name, _| attrs.iter().any(|attr| type_aliases(attr).contains(name)));
+            }
+        }
+        Ok(entities)
+    }
     async fn create_entity(&self, entity: &Entity) -> Result<(), StorageError> {
         let attrs_json = serde_json::to_value(&entity.attributes)?;
         let loc_geojson = Self::extract_location_geojson(entity);
@@ -342,38 +392,134 @@ impl EntityRepository for PgEntityStore {
         Ok(count)
     }
 
-    async fn update_entity_attrs(&self, id: &str, new_attrs: &Value) -> Result<(), StorageError> {
-        let clean = athena_model::attributes::without_context(new_attrs)
-            .map_err(|e| StorageError::Problem(ProblemDetails::bad_request_data(e.to_string())))?;
-        let new_attrs = &Value::Object(clean);
-        let loc_geojson = new_attrs.get("location").and_then(|l| {
-            if l.get("type").and_then(Value::as_str) == Some("GeoProperty") {
-                l.get("value")
-                    .map(|v| serde_json::to_string(v).unwrap_or_default())
-            } else {
-                None
-            }
-        });
-
-        let res = sqlx::query(
-            r#"
-            UPDATE entities
-            SET attrs = athena_merge_attrs(attrs, $2, true),
-                location = CASE WHEN $3::text IS NOT NULL THEN ST_SetSRID(ST_GeomFromGeoJSON($3), 4326) ELSE location END,
-                modified_at = NOW()
-            WHERE id = $1
-            "#,
-        )
-        .bind(id)
-        .bind(new_attrs)
-        .bind(loc_geojson)
-        .execute(&self.pool)
-        .await?;
-
-        if res.rows_affected() == 0 {
-            return Err(StorageError::EntityNotFound(id.to_string()));
+    async fn mutate_attributes(
+        &self,
+        id: &str,
+        fragment: &Value,
+        operation: athena_model::AttributeOperation,
+    ) -> Result<athena_model::UpdateResult, StorageError> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query("SELECT attrs,types,scope FROM entities WHERE id=$1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| StorageError::EntityNotFound(id.into()))?;
+        let previous: Value = row.try_get("attrs")?;
+        let previous_types: Vec<String> = row.try_get("types")?;
+        let previous_scope: Option<Vec<String>> = row.try_get("scope")?;
+        let mut fragment = fragment.as_object().cloned().ok_or_else(|| {
+            StorageError::Problem(ProblemDetails::bad_request_data(
+                "Entity fragment must be an object",
+            ))
+        })?;
+        for key in ["createdAt", "modifiedAt"] {
+            fragment.remove(key);
         }
+        let mut types = previous_types.clone();
+        let mut scope = previous_scope.clone();
+        let mut metadata = Vec::new();
+        if let Some(kind) = fragment.remove("type") {
+            let entity =
+                Entity::from_json(serde_json::json!({"id":id,"type":kind})).map_err(|e| {
+                    StorageError::Problem(ProblemDetails::bad_request_data(e.to_string()))
+                })?;
+            for kind in entity.types {
+                if !types.contains(&kind) {
+                    types.push(kind);
+                }
+            }
+            metadata.push("type".to_owned());
+        }
+        if let Some(value) = fragment.remove("scope") {
+            if value.as_str() == Some(athena_model::mutation::NGSI_NULL)
+                && operation == athena_model::AttributeOperation::Update
+            {
+                scope = None;
+            } else {
+                let incoming = athena_model::entity::parse_scope(&value).map_err(|e| {
+                    StorageError::Problem(ProblemDetails::bad_request_data(e.to_string()))
+                })?;
+                match operation {
+                    athena_model::AttributeOperation::Update if scope.is_none() => {}
+                    athena_model::AttributeOperation::Append { overwrite: false } => {
+                        let target = scope.get_or_insert_with(Vec::new);
+                        for item in incoming {
+                            if !target.contains(&item) {
+                                target.push(item);
+                            }
+                        }
+                    }
+                    _ => scope = Some(incoming),
+                }
+            }
+            metadata.push("scope".to_owned());
+        }
+        let (updated, mut result) = athena_model::mutation::apply_attributes(
+            &previous,
+            &Value::Object(fragment),
+            operation,
+        )?;
+        result.updated.extend(metadata);
+        if updated != previous || types != previous_types || scope != previous_scope {
+            sqlx::query("UPDATE entities SET attrs=$2,types=$3,type=$4,scope=$5 WHERE id=$1")
+                .bind(id)
+                .bind(updated)
+                .bind(&types)
+                .bind(&types[0])
+                .bind(scope)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(result)
+    }
 
+    async fn mutate_attribute(
+        &self,
+        id: &str,
+        attribute: &str,
+        fragment: &Value,
+        replace: bool,
+    ) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await?;
+        let previous: Value =
+            sqlx::query_scalar("SELECT attrs FROM entities WHERE id=$1 FOR UPDATE")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| StorageError::EntityNotFound(id.into()))?;
+        let updated =
+            athena_model::mutation::apply_attribute(&previous, attribute, fragment, replace)?;
+        if updated != previous {
+            sqlx::query("UPDATE entities SET attrs=$2 WHERE id=$1")
+                .bind(id)
+                .bind(updated)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn replace_entity(&self, id: &str, payload: &Value) -> Result<(), StorageError> {
+        let entity = athena_model::mutation::replacement(id, payload)?;
+        let res = sqlx::query("UPDATE entities SET attrs=$2,type=$3,types=$4,scope=$5 WHERE id=$1")
+            .bind(id)
+            .bind(serde_json::to_value(entity.attributes)?)
+            .bind(entity.type_)
+            .bind(entity.types)
+            .bind(entity.scope)
+            .execute(&self.pool)
+            .await?;
+        if res.rows_affected() == 0 {
+            return Err(StorageError::EntityNotFound(id.into()));
+        }
+        Ok(())
+    }
+
+    async fn update_entity_attrs(&self, id: &str, new_attrs: &Value) -> Result<(), StorageError> {
+        self.mutate_attributes(id, new_attrs, athena_model::AttributeOperation::Update)
+            .await?;
         Ok(())
     }
 
@@ -383,32 +529,13 @@ impl EntityRepository for PgEntityStore {
         new_attrs: &Value,
         overwrite: bool,
     ) -> Result<(), StorageError> {
-        let clean = athena_model::attributes::without_context(new_attrs)
-            .map_err(|e| StorageError::Problem(ProblemDetails::bad_request_data(e.to_string())))?;
-        let new_attrs = &Value::Object(clean);
-        if overwrite {
-            self.update_entity_attrs(id, new_attrs).await
-        } else {
-            // Only add keys that do not already exist in attrs
-            let res = sqlx::query(
-                r#"
-                UPDATE entities
-                SET attrs = athena_merge_attrs(attrs, $2, false),
-                    modified_at = NOW()
-                WHERE id = $1
-                "#,
-            )
-            .bind(id)
-            .bind(new_attrs)
-            .execute(&self.pool)
-            .await?;
-
-            if res.rows_affected() == 0 {
-                return Err(StorageError::EntityNotFound(id.to_string()));
-            }
-
-            Ok(())
-        }
+        self.mutate_attributes(
+            id,
+            new_attrs,
+            athena_model::AttributeOperation::Append { overwrite },
+        )
+        .await?;
+        Ok(())
     }
 
     async fn delete_entity_attr(&self, id: &str, attribute: &str) -> Result<(), StorageError> {

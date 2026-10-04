@@ -204,6 +204,10 @@ async fn temporal_regressions(pool: &sqlx::PgPool, prefix: &str) {
         "owner": {"type":"Relationship","object":"urn:person:one","observedAt":"2026-09-22T00:00:00Z"}
     })).await.unwrap();
     let mut query = TemporalQuery {
+        ids: None,
+        id_pattern: None,
+        q: None,
+        geo_q: None,
         timerel: TimeRel::After,
         time_at: "2020-01-01T00:00:00Z".parse().unwrap(),
         end_time_at: None,

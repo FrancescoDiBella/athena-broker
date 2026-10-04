@@ -121,19 +121,19 @@ impl CsourceRegistration {
                 } else {
                     entities.iter().any(|target| {
                         if let Some(et) = entity_type {
-                            if target.r#type != et {
+                            if !et.split(',').any(|kind| target.r#type == kind) {
                                 return false;
                             }
                         }
                         if let Some(eid) = entity_id {
                             if let Some(tid) = &target.id {
-                                if tid != eid {
+                                if !eid.split(',').any(|id| tid == id) {
                                     return false;
                                 }
                             }
                             if let Some(pat) = &target.id_pattern {
                                 if let Ok(re) = regex::Regex::new(pat) {
-                                    if !re.is_match(eid) {
+                                    if !eid.split(',').any(|id| re.is_match(id)) {
                                         return false;
                                     }
                                 }

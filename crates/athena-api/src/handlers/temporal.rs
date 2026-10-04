@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query, RawQuery, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -13,6 +13,17 @@ use athena_model::{AggrMethod, ProblemDetails, TemporalQuery, TimeProperty, Time
 
 #[derive(Debug, Deserialize)]
 pub struct TemporalQueryRequest {
+    pub q: Option<String>,
+    #[serde(rename = "idPattern")]
+    pub id_pattern: Option<String>,
+    pub georel: Option<String>,
+    pub geometry: Option<String>,
+    pub coordinates: Option<String>,
+    pub geoproperty: Option<String>,
+    pub count: Option<bool>,
+    pub local: Option<bool>,
+    #[serde(rename = "splitEntities")]
+    pub split_entities: Option<bool>,
     pub timerel: Option<String>,
     #[serde(rename = "timeAt")]
     pub time_at: Option<String>,
@@ -143,6 +154,7 @@ pub async fn query_temporal_entity_by_id(
 
 pub async fn query_temporal_entities(
     State(state): State<AppState>,
+    RawQuery(raw_query): RawQuery,
     Query(params): Query<TemporalQueryRequest>,
 ) -> Response {
     let query = match build_temporal_query(&params) {
@@ -155,59 +167,67 @@ pub async fn query_temporal_entities(
         .as_ref()
         .map(|s| s.split(',').map(str::trim).map(String::from).collect());
 
-    if let Some(ref entity_id) = params.id {
+    let limit = params.limit.unwrap_or(20);
+    let offset = params.offset.unwrap_or(0);
+    if limit > 1000 || (limit == 0 && params.count != Some(true)) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ProblemDetails::bad_request_data(
+                "limit must be 1..1000, or 0 with count=true",
+            )),
+        )
+            .into_response();
+    }
+    let mut headers = HeaderMap::new();
+    {
         match state
             .temporal_repo
-            .query_temporal(entity_id, filter_attrs.as_deref(), &query)
+            .count_temporal_entities(params.r#type.as_deref(), filter_attrs.as_deref(), &query)
             .await
         {
-            Ok(res) => (StatusCode::OK, Json(vec![res])).into_response(),
-            Err(athena_storage::StorageError::Problem(problem)) => {
-                let status = problem
-                    .status
-                    .and_then(|s| StatusCode::from_u16(s).ok())
-                    .unwrap_or(StatusCode::BAD_REQUEST);
-                (status, Json(problem)).into_response()
+            Ok(count) => {
+                if params.count == Some(true) {
+                    headers.insert(
+                        "NGSILD-Results-Count",
+                        HeaderValue::from_str(&count.to_string()).unwrap(),
+                    );
+                }
+                crate::handlers::pagination::links(
+                    &mut headers,
+                    "/ngsi-ld/v1/temporal/entities",
+                    raw_query.as_deref(),
+                    limit as i64,
+                    offset as i64,
+                    count,
+                );
             }
-            Err(athena_storage::StorageError::EntityNotFound(id)) => (
-                StatusCode::NOT_FOUND,
-                Json(ProblemDetails::not_found(format!("Entity {id} not found"))),
-            )
-                .into_response(),
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ProblemDetails::internal_error(e.to_string())),
-            )
-                .into_response(),
+            Err(error) => return crate::handlers::attrs::mutation_response::<()>(Err(error)),
         }
-    } else {
-        let limit = params.limit.unwrap_or(20);
-        let offset = params.offset.unwrap_or(0);
-        let entity_type = params.r#type.as_deref();
-
-        match state
-            .temporal_repo
-            .query_temporal_entities(entity_type, filter_attrs.as_deref(), &query, limit, offset)
-            .await
-        {
-            Ok(res) => (StatusCode::OK, Json(res)).into_response(),
-            Err(athena_storage::StorageError::Problem(problem)) => {
-                let status = problem
-                    .status
-                    .and_then(|s| StatusCode::from_u16(s).ok())
-                    .unwrap_or(StatusCode::BAD_REQUEST);
-                (status, Json(problem)).into_response()
-            }
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ProblemDetails::internal_error(e.to_string())),
-            )
-                .into_response(),
-        }
+    }
+    match state
+        .temporal_repo
+        .query_temporal_entities(
+            params.r#type.as_deref(),
+            filter_attrs.as_deref(),
+            &query,
+            limit,
+            offset,
+        )
+        .await
+    {
+        Ok(results) => (StatusCode::OK, headers, Json(results)).into_response(),
+        Err(error) => crate::handlers::attrs::mutation_response::<()>(Err(error)),
     }
 }
 
 fn build_temporal_query(params: &TemporalQueryRequest) -> Result<TemporalQuery, Response> {
+    if params.local == Some(false) || params.split_entities == Some(true) {
+        let mut problem = ProblemDetails::bad_request_data(
+            "Temporal federation is not implemented; use local=true for local history",
+        );
+        problem.status = Some(501);
+        return Err((StatusCode::NOT_IMPLEMENTED, Json(problem)).into_response());
+    }
     let timerel_str = match &params.timerel {
         Some(t) => t.to_lowercase(),
         None => "after".to_string(),
@@ -284,6 +304,7 @@ fn build_temporal_query(params: &TemporalQueryRequest) -> Result<TemporalQuery, 
     let timeproperty = match params.timeproperty.as_deref() {
         Some("createdAt") => TimeProperty::CreatedAt,
         Some("modifiedAt") => TimeProperty::ModifiedAt,
+        Some("deletedAt") => TimeProperty::DeletedAt,
         None | Some("observedAt") => TimeProperty::ObservedAt,
         Some(_) => {
             return Err((
@@ -331,7 +352,45 @@ fn build_temporal_query(params: &TemporalQueryRequest) -> Result<TemporalQuery, 
             }
         }
     }
+    let geo_q = athena_query::GeoQueryParser::parse(
+        params.georel.as_deref(),
+        params.geometry.as_deref(),
+        params.coordinates.as_deref(),
+        params.geoproperty.as_deref(),
+    )
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ProblemDetails::bad_request_data(e.to_string())),
+        )
+            .into_response()
+    })?;
+    if let Some(q) = &params.q {
+        athena_query::Parser::parse_str(q).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ProblemDetails::bad_request_data(e.to_string())),
+            )
+                .into_response()
+        })?;
+    }
+    if let Some(pattern) = &params.id_pattern {
+        athena_query::Parser::validate_pattern(pattern).map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ProblemDetails::bad_request_data(error.to_string())),
+            )
+                .into_response()
+        })?;
+    }
     Ok(TemporalQuery {
+        ids: params
+            .id
+            .as_ref()
+            .map(|ids| ids.split(',').map(str::to_owned).collect()),
+        id_pattern: params.id_pattern.clone(),
+        q: params.q.clone(),
+        geo_q,
         timerel,
         time_at,
         end_time_at,
