@@ -311,6 +311,17 @@ async fn mutations(app: &Router, pool: &sqlx::PgPool, prefix: &str) {
 }
 
 async fn historical_geo(app: &Router, _pool: &sqlx::PgPool, prefix: &str) {
+    let (status, _, body) = request(
+        app,
+        "GET",
+        "/ngsi-ld/v1/temporal/entities?offset=18446744073709551615",
+        None,
+    )
+    .await;
+    assert_eq!(
+        status, 400,
+        "oversized offsets must not wrap into negative SQL offsets: {body}"
+    );
     for path in ["/ngsi-ld/v1/entities", "/ngsi-ld/v1/temporal/entities"] {
         for parameter in [("idPattern", "["), ("q", "temperature~='['")] {
             let (status, _, body) = request(app, "GET", &uri(path, &[parameter]), None).await;

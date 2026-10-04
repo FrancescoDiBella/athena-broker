@@ -169,11 +169,11 @@ pub async fn query_temporal_entities(
 
     let limit = params.limit.unwrap_or(20);
     let offset = params.offset.unwrap_or(0);
-    if limit > 1000 || (limit == 0 && params.count != Some(true)) {
+    if limit > 1000 || (limit == 0 && params.count != Some(true)) || offset > i64::MAX as usize {
         return (
             StatusCode::BAD_REQUEST,
             Json(ProblemDetails::bad_request_data(
-                "limit must be 1..1000, or 0 with count=true",
+                "limit must be 1..1000, or 0 with count=true; offset must fit a signed 64-bit integer",
             )),
         )
             .into_response();
