@@ -157,7 +157,7 @@ pub async fn query_temporal_entities(
     RawQuery(raw_query): RawQuery,
     Query(params): Query<TemporalQueryRequest>,
 ) -> Response {
-    let query = match build_temporal_query(&params) {
+    let query = match build_temporal_collection_query(&params) {
         Ok(q) => q,
         Err(err_resp) => return err_resp,
     };
@@ -218,6 +218,23 @@ pub async fn query_temporal_entities(
         Ok(results) => (StatusCode::OK, headers, Json(results)).into_response(),
         Err(error) => crate::handlers::attrs::mutation_response::<()>(Err(error)),
     }
+}
+
+fn build_temporal_collection_query(
+    params: &TemporalQueryRequest,
+) -> Result<TemporalQuery, Response> {
+    // ETSI 5.7.4.4 requires an explicit temporal query for the collection
+    // operation. Keep retrieval by resource ID's optional-query behavior separate.
+    if params.timerel.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ProblemDetails::bad_request_data(
+                "timerel and timeAt are required for temporal collection queries",
+            )),
+        )
+            .into_response());
+    }
+    build_temporal_query(params)
 }
 
 fn build_temporal_query(params: &TemporalQueryRequest) -> Result<TemporalQuery, Response> {
@@ -288,6 +305,15 @@ fn build_temporal_query(params: &TemporalQueryRequest) -> Result<TemporalQuery, 
     };
 
     if timerel == TimeRel::Between {
+        if end_time_at.is_none() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ProblemDetails::bad_request_data(
+                    "endTimeAt is required with timerel=between",
+                )),
+            )
+                .into_response());
+        }
         if let Some(ref end) = end_time_at {
             if time_at > *end {
                 return Err((
@@ -545,4 +571,56 @@ pub async fn update_temporal_instance(
             .update_temporal_instance(&id, &attribute, &instance, &patch)
             .await,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn collection_requires_a_complete_temporal_query() {
+        for input in [
+            json!({}),
+            json!({"timeAt": "2000-01-01T00:00:00Z"}),
+            json!({"endTimeAt": "2000-01-02T00:00:00Z"}),
+            json!({"timeproperty": "createdAt"}),
+            json!({"lastN": 1}),
+            json!({"timerel": "before"}),
+            json!({"timerel": "between", "timeAt": "2000-01-01T00:00:00Z"}),
+        ] {
+            let params = serde_json::from_value(input.clone()).unwrap();
+            let response = build_temporal_collection_query(&params).unwrap_err();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{input}");
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let problem: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                problem["type"],
+                "https://uri.etsi.org/ngsi-ld/errors/BadRequestData"
+            );
+        }
+    }
+
+    #[test]
+    fn collection_accepts_explicit_intervals_and_optional_timeproperty() {
+        for relation in ["before", "after", "between"] {
+            let mut input = json!({"timerel": relation, "timeAt": "2000-01-01T00:00:00Z"});
+            if relation == "between" {
+                input["endTimeAt"] = json!("2000-01-02T00:00:00Z");
+            }
+            let params = serde_json::from_value(input).unwrap();
+            let query = build_temporal_collection_query(&params).unwrap();
+            assert_eq!(query.timeproperty, TimeProperty::ObservedAt);
+        }
+    }
+
+    #[test]
+    fn resource_id_retrieval_keeps_its_optional_temporal_query() {
+        let params = serde_json::from_value(json!({})).unwrap();
+        let query = build_temporal_query(&params).unwrap();
+        assert_eq!(query.timerel, TimeRel::After);
+        assert_eq!(query.time_at, DateTime::UNIX_EPOCH);
+    }
 }

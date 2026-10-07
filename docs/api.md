@@ -63,6 +63,11 @@ history-only or deleted entities. `after` includes `timeAt`; `between` excludes
 `endTimeAt`. `timeproperty=deletedAt` selects deletion history. Histories retain arrays
 for singleton attributes. Collection queries return an empty array for non-matching
 IDs and offer count and next/previous links. `limit=0` requires `count=true`.
+Collection requests require explicit `timerel` and `timeAt`; `between` additionally
+requires `endTimeAt`. Missing temporal queries return 400 `BadRequestData`, including
+requests with geographic filters or `lastN`. `timeproperty` remains optional and
+defaults to `observedAt`. Retrieval at `/temporal/entities/{id}` retains its
+optional temporal-query behavior.
 
 ## Minimal entity walkthrough
 

@@ -1,7 +1,7 @@
 use athena_model::{CsourceRegistration, Entity, EntityInfo, RegistrationInfo};
 use athena_storage::{
     CsourceRepository, EntityRepository, PgCsourceStore, PgEntityStore, PgSubscriptionStore,
-    PgTemporalStore, SubscriptionRepository,
+    PgTemporalStore, SubscriptionRepository, TemporalRepository,
 };
 use axum::{
     body::{to_bytes, Body},
@@ -114,6 +114,7 @@ async fn roadmap_protocol_regressions() {
     let prefix = format!("urn:ngsi-ld:Roadmap:{}", uuid::Uuid::new_v4());
     mutations(&app, &pool, &prefix).await;
     historical_geo(&app, &pool, &prefix).await;
+    report_temporal_regressions(&app, &pool, &prefix).await;
     spatial_edges(&app, &prefix).await;
     query_matcher_parity(&pool, &prefix).await;
     federation(&app, &pool, &prefix).await;
@@ -310,11 +311,154 @@ async fn mutations(app: &Router, pool: &sqlx::PgPool, prefix: &str) {
     assert_eq!(body["urn:example:temperature"]["value"], 7);
 }
 
+// Replay the report's distinguishing cases with deterministic historical times.
+// A full page of 1,000 is deliberately smaller than the 2,001-entity fixture.
+async fn report_temporal_regressions(app: &Router, pool: &sqlx::PgPool, prefix: &str) {
+    let store = PgTemporalStore::new(pool.clone());
+    let kind = format!("{prefix}:ReportSensor");
+    let target = format!("{prefix}:report:zz-target");
+    let outside = format!("{prefix}:report:0000");
+    let sample = "urn:athena:probe:sample";
+    let mut ids = vec![target.clone()];
+    ids.extend((0..2000).map(|i| format!("{prefix}:report:{i:04}")));
+    for id in &ids {
+        let is_target = id == &target;
+        let timestamp = if is_target {
+            "2000-01-01T00:00:00Z"
+        } else {
+            "2001-01-01T00:00:00Z"
+        };
+        let coordinates = if is_target {
+            json!([15.1, 37.5])
+        } else {
+            json!([16.1, 38.5])
+        };
+        store
+            .create_temporal_entity(
+                id,
+                &kind,
+                &json!({
+                    sample: {"type": "Property", "value": 1,
+                        "observedAt": timestamp, "createdAt": timestamp},
+                    "location": {"type": "GeoProperty",
+                        "value": {"type": "Point", "coordinates": coordinates},
+                        "observedAt": "2000-01-01T00:00:00Z"}
+                }),
+            )
+            .await
+            .unwrap();
+    }
+    let path = "/ngsi-ld/v1/temporal/entities";
+    let baseline = vec![
+        ("type", kind.as_str()),
+        ("attrs", sample),
+        ("timerel", "between"),
+        ("timeAt", "1999-12-31T00:00:00Z"),
+        ("endTimeAt", "2002-01-01T00:00:00Z"),
+        ("limit", "1000"),
+        ("count", "true"),
+    ];
+    for (offset, expected) in [("0", 1000), ("1000", 1000), ("2000", 1)] {
+        let mut pairs = baseline.clone();
+        pairs.push(("offset", offset));
+        let (status, headers, body) = request(app, "GET", &uri(path, &pairs), None).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(headers["NGSILD-Results-Count"], "2001");
+        let entities = body.as_array().unwrap();
+        assert_eq!(entities.len(), expected);
+        assert_eq!(entities.iter().any(|e| e["id"] == target), offset == "2000");
+    }
+    for property in ["observedAt", "createdAt"] {
+        let pairs = vec![
+            ("type", kind.as_str()),
+            ("attrs", sample),
+            ("timerel", "before"),
+            ("timeAt", "2000-06-01T00:00:00Z"),
+            ("timeproperty", property),
+            ("limit", "1000"),
+            ("count", "true"),
+        ];
+        let (status, headers, body) = request(app, "GET", &uri(path, &pairs), None).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(headers["NGSILD-Results-Count"], "1");
+        assert_eq!(body.as_array().unwrap().len(), 1);
+        assert_eq!(body[0]["id"], target);
+        for (id, expected) in [(&target, 1), (&outside, 0)] {
+            let mut selected = pairs.clone();
+            selected.push(("id", id.as_str()));
+            let (status, headers, body) = request(app, "GET", &uri(path, &selected), None).await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body.as_array().unwrap().len(), expected);
+            assert_eq!(headers["NGSILD-Results-Count"], expected.to_string());
+        }
+    }
+    for (relation, geometry, coordinates) in [
+        (
+            "within",
+            "Polygon",
+            "[[[15.08,37.48],[15.12,37.48],[15.12,37.52],[15.08,37.52],[15.08,37.48]]]",
+        ),
+        (
+            "intersects",
+            "Polygon",
+            "[[[15.08,37.48],[15.12,37.48],[15.12,37.52],[15.08,37.52],[15.08,37.48]]]",
+        ),
+        ("near;maxDistance==1000", "Point", "[15.1,37.5]"),
+    ] {
+        let mut pairs = vec![
+            ("type", kind.as_str()),
+            ("georel", relation),
+            ("geometry", geometry),
+            ("coordinates", coordinates),
+            ("geoproperty", "location"),
+            ("limit", "1000"),
+            ("count", "true"),
+        ];
+        let (status, _, body) = request(app, "GET", &uri(path, &pairs), None).await;
+        assert_eq!(status, 400, "missing temporal query: {body}");
+        assert_eq!(
+            body["type"],
+            "https://uri.etsi.org/ngsi-ld/errors/BadRequestData"
+        );
+        pairs.extend([
+            ("timerel", "between"),
+            ("timeAt", "1999-12-31T00:00:00Z"),
+            ("endTimeAt", "2000-01-02T00:00:00Z"),
+        ]);
+        let (status, headers, body) = request(app, "GET", &uri(path, &pairs), None).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(headers["NGSILD-Results-Count"], "1");
+        assert_eq!(body.as_array().unwrap().len(), 1);
+        assert_eq!(
+            body[0]["id"], target,
+            "geo filtering must precede pagination"
+        );
+        for (id, expected) in [(&target, 1), (&outside, 0)] {
+            let mut selected = pairs.clone();
+            selected.push(("id", id.as_str()));
+            let (status, headers, body) = request(app, "GET", &uri(path, &selected), None).await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body.as_array().unwrap().len(), expected);
+            assert_eq!(headers["NGSILD-Results-Count"], expected.to_string());
+        }
+    }
+    sqlx::query("DELETE FROM entity_temporal WHERE entity_id = ANY($1)")
+        .bind(&ids)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM temporal_entities WHERE id = ANY($1)")
+        .bind(&ids)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
 async fn historical_geo(app: &Router, _pool: &sqlx::PgPool, prefix: &str) {
     let (status, _, body) = request(
         app,
         "GET",
-        "/ngsi-ld/v1/temporal/entities?offset=18446744073709551615",
+        "/ngsi-ld/v1/temporal/entities?timerel=after&timeAt=2026-01-01T00:00:00Z&offset=18446744073709551615",
         None,
     )
     .await;
@@ -324,7 +468,11 @@ async fn historical_geo(app: &Router, _pool: &sqlx::PgPool, prefix: &str) {
     );
     for path in ["/ngsi-ld/v1/entities", "/ngsi-ld/v1/temporal/entities"] {
         for parameter in [("idPattern", "["), ("q", "temperature~='['")] {
-            let (status, _, body) = request(app, "GET", &uri(path, &[parameter]), None).await;
+            let mut parameters = vec![parameter];
+            if path.contains("/temporal/") {
+                parameters.extend([("timerel", "after"), ("timeAt", "2026-01-01T00:00:00Z")]);
+            }
+            let (status, _, body) = request(app, "GET", &uri(path, &parameters), None).await;
             assert_eq!(status, 400, "invalid regex must not reach SQL: {body}");
         }
     }
@@ -332,7 +480,9 @@ async fn historical_geo(app: &Router, _pool: &sqlx::PgPool, prefix: &str) {
         let (status, _, body) = request(
             app,
             "GET",
-            &format!("/ngsi-ld/v1/temporal/entities?{option}"),
+            &format!(
+                "/ngsi-ld/v1/temporal/entities?timerel=after&timeAt=2026-01-01T00:00:00Z&{option}"
+            ),
             None,
         )
         .await;
