@@ -141,6 +141,9 @@ mod tests {
 
         let compiled = SqlCompiler::compile_geo(&geo, 1);
         assert!(compiled.where_clause.contains("ST_DWithin"));
-        assert_eq!(compiled.params.len(), 2);
+        assert_eq!(compiled.params.last(), Some(&SqlParam::Number(1000.0)));
+        assert!(compiled
+            .params
+            .contains(&SqlParam::String("location".into())));
     }
 }

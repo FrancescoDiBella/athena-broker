@@ -30,6 +30,7 @@ fn time_column(query: &TemporalQuery) -> &'static str {
         TimeProperty::ObservedAt => "observed_at",
         TimeProperty::CreatedAt => "created_at",
         TimeProperty::ModifiedAt => "modified_at",
+        TimeProperty::DeletedAt => "(instance->>'deletedAt')::timestamptz",
     }
 }
 
@@ -61,7 +62,7 @@ fn filters(
             builder.push(" < ").push_bind(query.time_at);
         }
         TimeRel::After => {
-            builder.push(" > ").push_bind(query.time_at);
+            builder.push(" >= ").push_bind(query.time_at);
         }
         TimeRel::Between => {
             builder
@@ -69,7 +70,7 @@ fn filters(
                 .push_bind(query.time_at)
                 .push(" AND ")
                 .push(column)
-                .push(" <= ")
+                .push(" < ")
                 .push_bind(query.end_time_at);
         }
     }
@@ -503,10 +504,34 @@ impl TemporalRepository for PgTemporalStore {
         attrs: Option<&[String]>,
         query: &TemporalQuery,
     ) -> Result<Value, StorageError> {
+        if query.q.is_some() || query.geo_q.is_some() {
+            let mut selected = query.clone();
+            selected.ids = Some(vec![id.to_owned()]);
+            return self
+                .query_temporal_entities(None, attrs, &selected, 1, 0)
+                .await?
+                .pop()
+                .ok_or_else(|| StorageError::EntityNotFound(id.into()));
+        }
         let mut results = self.read_many(&[id.to_string()], attrs, query).await?;
         results
             .pop()
             .ok_or_else(|| StorageError::EntityNotFound(id.into()))
+    }
+
+    async fn count_temporal_entities(
+        &self,
+        entity_type: Option<&str>,
+        attrs: Option<&[String]>,
+        query: &TemporalQuery,
+    ) -> Result<i64, StorageError> {
+        let (sql, params) = selection_sql(entity_type, attrs, query)?;
+        let sql = format!("{sql} SELECT count(*) FROM matched");
+        let mut statement = sqlx::query_scalar::<_, i64>(&sql);
+        for param in params {
+            statement = bind_selection(statement, param);
+        }
+        Ok(statement.fetch_one(&self.pool).await?)
     }
 
     async fn query_temporal_entities(
@@ -517,25 +542,120 @@ impl TemporalRepository for PgTemporalStore {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<Value>, StorageError> {
-        validate_query(query)?;
         if limit > 1000 || offset > i64::MAX as usize {
             return Err(bad("Invalid pagination"));
         }
-        let mut builder =
-            QueryBuilder::<Postgres>::new("SELECT id FROM temporal_entities e WHERE ");
-        if let Some(kind) = entity_type {
-            builder
-                .push_bind(kind.to_owned())
-                .push(" = ANY(e.types) AND ");
+        let (sql, mut params) = selection_sql(entity_type, attrs, query)?;
+        let sql = format!(
+            "{sql} SELECT id FROM matched ORDER BY id LIMIT ${} OFFSET ${}",
+            params.len() + 1,
+            params.len() + 2
+        );
+        params.push(athena_query::SqlParam::Integer(limit as i64));
+        params.push(athena_query::SqlParam::Integer(offset as i64));
+        let mut statement = sqlx::query_scalar::<_, String>(&sql);
+        for param in params {
+            statement = bind_selection(statement, param);
         }
-        builder.push("EXISTS (SELECT 1 FROM entity_temporal WHERE entity_id=e.id AND ");
-        filters(&mut builder, query, attrs);
-        builder
-            .push(") ORDER BY id LIMIT ")
-            .push_bind(limit as i64)
-            .push(" OFFSET ")
-            .push_bind(offset as i64);
-        let ids: Vec<String> = builder.build_query_scalar().fetch_all(&self.pool).await?;
+        let ids = statement.fetch_all(&self.pool).await?;
         self.read_many(&ids, attrs, query).await
     }
+}
+
+fn bind_selection<'q, O>(
+    statement: sqlx::query::QueryScalar<'q, Postgres, O, sqlx::postgres::PgArguments>,
+    param: athena_query::SqlParam,
+) -> sqlx::query::QueryScalar<'q, Postgres, O, sqlx::postgres::PgArguments> {
+    use athena_query::SqlParam;
+    match param {
+        SqlParam::String(v) => statement.bind(v),
+        SqlParam::StringList(v) => statement.bind(v),
+        SqlParam::Number(v) => statement.bind(v),
+        SqlParam::Integer(v) => statement.bind(v),
+        SqlParam::Boolean(v) => statement.bind(v),
+        SqlParam::NumberList(v) => statement.bind(v),
+    }
+}
+
+fn selection_sql(
+    entity_type: Option<&str>,
+    attrs: Option<&[String]>,
+    query: &TemporalQuery,
+) -> Result<(String, Vec<athena_query::SqlParam>), StorageError> {
+    use athena_query::{Parser, SqlCompiler, SqlParam};
+    validate_query(query)?;
+    let mut params = vec![SqlParam::String(query.time_at.to_rfc3339())];
+    let column = time_column(query);
+    let time_filter = match query.timerel {
+        TimeRel::Before => format!("{column} < $1::timestamptz"),
+        TimeRel::After => format!("{column} >= $1::timestamptz"),
+        TimeRel::Between => {
+            params.push(SqlParam::String(query.end_time_at.unwrap().to_rfc3339()));
+            format!("{column} >= $1::timestamptz AND {column} < $2::timestamptz")
+        }
+    };
+    let mut sql = "WITH candidates AS (SELECT id FROM temporal_entities WHERE TRUE".to_owned();
+    if let Some(ids) = &query.ids {
+        if ids.is_empty()
+            || ids
+                .iter()
+                .any(|id| !athena_model::attributes::valid_uri(id))
+        {
+            return Err(bad("Invalid temporal entity IDs"));
+        }
+        params.push(SqlParam::StringList(ids.clone()));
+        sql.push_str(&format!(" AND id=ANY(${}::text[])", params.len()));
+    }
+    if let Some(pattern) = &query.id_pattern {
+        params.push(SqlParam::String(pattern.clone()));
+        sql.push_str(&format!(" AND id ~ ${}", params.len()));
+    }
+    if let Some(types) = entity_type {
+        params.push(SqlParam::StringList(
+            types
+                .split(',')
+                .flat_map(|t| {
+                    let mut names = vec![t.to_owned()];
+                    if let Some(short) =
+                        t.strip_prefix("https://uri.etsi.org/ngsi-ld/default-context/")
+                    {
+                        names.push(short.into());
+                    }
+                    names
+                })
+                .collect(),
+        ));
+        sql.push_str(&format!(" AND types && ${}::text[]", params.len()));
+    }
+    // The common unfiltered history path can use an index-backed EXISTS instead
+    // of assembling every historical instance into a JSON document.
+    if query.q.is_none() && query.geo_q.is_none() {
+        sql.push_str(&format!("), matched AS (SELECT id FROM candidates WHERE EXISTS (SELECT 1 FROM entity_temporal WHERE entity_id=candidates.id AND {time_filter}"));
+        if let Some(attrs) = attrs.filter(|a| !a.is_empty()) {
+            params.push(SqlParam::StringList(attrs.to_vec()));
+            sql.push_str(&format!(" AND attribute_id=ANY(${}::text[])", params.len()));
+        }
+        sql.push_str("))");
+        return Ok((sql, params));
+    }
+    // Filters use only instances inside the requested time interval, independently
+    // of current state and before output projection/lastN/aggregation.
+    sql.push_str(&format!("), series AS (SELECT entity_id,attribute_id,jsonb_agg(instance) AS instances FROM entity_temporal JOIN candidates ON candidates.id=entity_id WHERE {time_filter} GROUP BY entity_id,attribute_id), documents AS (SELECT entity_id AS id,jsonb_object_agg(attribute_id,instances) AS attrs FROM series GROUP BY entity_id), matched AS (SELECT id FROM documents WHERE TRUE"));
+    if let Some(attrs) = attrs.filter(|a| !a.is_empty()) {
+        params.push(SqlParam::StringList(attrs.to_vec()));
+        sql.push_str(&format!(" AND attrs ?| ${}::text[]", params.len()));
+    }
+    if let Some(q) = &query.q {
+        let expression = Parser::parse_str(q).map_err(|e| bad(e.to_string()))?;
+        let compiled = SqlCompiler::compile_q(&expression, params.len());
+        sql.push_str(&format!(" AND {}", compiled.where_clause));
+        params.extend(compiled.params);
+    }
+    if let Some(geo) = &query.geo_q {
+        let compiled = SqlCompiler::compile_geo(geo, params.len() + 1);
+        sql.push_str(&format!(" AND {}", compiled.where_clause));
+        params.extend(compiled.params);
+    }
+    sql.push(')');
+    Ok((sql, params))
 }

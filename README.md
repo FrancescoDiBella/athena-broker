@@ -52,7 +52,13 @@ the [operations runbook](docs/operations.md) before updating an existing instanc
   throttling, standard receiver headers and type-indexed matching prepared per batch.
 - Persistent `timeInterval` scheduling with atomic snapshots, bounded backlog and
   configurable payload limits; MQTT 3.1.1/5.0 notifications with QoS 0/1/2 and verified TLS.
-- A lockfile, pinned Rust toolchain and CI configuration with real database tests.
+- Dataset-aware attribute PATCH/PUT, entity replacement, null deletion, partial append
+  results, and atomic concurrent changes.
+- Temporal value/geo filters over history, boundary-correct time windows, deletedAt,
+  counts and navigation links; multi-dataset spatial queries and overlaps.
+- Bounded federated entity collection, dataset merge, global count/pagination and
+  optional filtering of split entities after merge.
+- A lockfile, pinned Rust toolchain and CI with real database tests.
 
 The code is organized into `athena-api` (HTTP routes/UI), `athena-model` (NGSI-LD
 objects), `athena-jsonld` (contexts), `athena-query` (filter parsing),
@@ -199,11 +205,15 @@ Archived benchmark JSON and SHA-256 manifests preserve the scope of those report
 
 The complete architectural plan is larger than the implemented foundation. See
 [implementation status](IMPLEMENTATION.md) and the [architecture plan](docs/architecture/piano-evoluzione-2026-09-22.md).
-Outstanding areas include full update/partial-success semantics, remaining subscription options, distributed scheduling, MQTT connection pooling, tenant isolation, temporal pagination and calendar
-periods, temporal partitioning, discovery/projection/join coverage, complete federated
-pagination/count/registration semantics and an independent conformance suite.
+Outstanding areas include remaining batch/merge semantics, subscription options,
+MQTT connection pooling, tenant isolation, instance-level temporal pagination and
+calendar periods, temporal partitioning, discovery/projection/join coverage,
+registration modes, temporal federation/distributed writes and independent conformance
+qualification. [Roadmap issue #1](https://github.com/FrancescoDiBella/athena-broker/issues/1)
+tracks the full backlog.
 `NGSILD-Tenant` is rejected instead of silently ignored. Federation
-remains experimental; use `local=true` for a bounded local query contract.
+remains bounded and experimental; see the [query and mutation report](docs/architecture/query-mutation-2026-10-04.md)
+for merge policy, split-entity queries and explicit failure behavior.
 
 Local component measurements and their limitations are in
 [initial validation](docs/architecture/implementazione-verifiche-2026-09-22.md) and

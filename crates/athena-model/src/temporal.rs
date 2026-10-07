@@ -15,6 +15,7 @@ pub enum TimeProperty {
     ObservedAt,
     CreatedAt,
     ModifiedAt,
+    DeletedAt,
 }
 
 impl Default for TimeProperty {
@@ -38,6 +39,14 @@ pub enum AggrMethod {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TemporalQuery {
+    #[serde(default)]
+    pub ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub id_pattern: Option<String>,
+    #[serde(default)]
+    pub q: Option<String>,
+    #[serde(default)]
+    pub geo_q: Option<crate::geoquery::GeoQuery>,
     pub timerel: TimeRel,
     pub time_at: DateTime<Utc>,
     pub end_time_at: Option<DateTime<Utc>>,

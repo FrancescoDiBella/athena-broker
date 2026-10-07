@@ -37,13 +37,20 @@ impl SqlCompiler {
             geo.geometry, geo.coordinates
         ))];
         let target = format!("ST_SetSRID(ST_GeomFromGeoJSON(${start_idx}), 4326)");
-        let column = if geo.geoproperty == "location" {
-            "location".to_owned()
+        let idx = start_idx + params.len();
+        params.push(SqlParam::String(geo.geoproperty.clone()));
+        let root = format!("attrs->${idx}::text");
+        let root = if let Some(legacy) = geo
+            .geoproperty
+            .strip_prefix("https://uri.etsi.org/ngsi-ld/default-context/")
+        {
+            let legacy_idx = start_idx + params.len();
+            params.push(SqlParam::String(legacy.into()));
+            format!("COALESCE({root}, attrs->${legacy_idx}::text)")
         } else {
-            let idx = start_idx + params.len();
-            params.push(SqlParam::String(geo.geoproperty.clone()));
-            format!("ST_SetSRID(ST_GeomFromGeoJSON((attrs->${idx}::text->'value')::text), 4326)")
+            root
         };
+        let column = "(CASE WHEN ga.value->>'type'='GeoProperty' THEN ST_SetSRID(ST_GeomFromGeoJSON((ga.value->'value')::text),4326) END)";
         let where_clause = match &geo.georel {
             GeoRel::Near {
                 max_distance,
@@ -71,7 +78,9 @@ impl SqlCompiler {
             GeoRel::Intersects => format!("ST_Intersects({column}, {target})"),
             GeoRel::Disjoint => format!("ST_Disjoint({column}, {target})"),
             GeoRel::Equals => format!("ST_Equals({column}, {target})"),
+            GeoRel::Overlaps => format!("ST_Overlaps({column}, {target})"),
         };
+        let where_clause = format!("EXISTS(SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof({root})='array' THEN {root} ELSE jsonb_build_array({root}) END) ga(value) WHERE {where_clause})");
         CompiledQuery {
             where_clause,
             params,

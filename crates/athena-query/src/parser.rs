@@ -7,6 +7,8 @@ use crate::lexer::{Lexer, LexerError, Token};
 pub enum ParserError {
     #[error("Query exceeds the complexity limit")]
     TooComplex,
+    #[error("Invalid or unsupported regular expression: {0}")]
+    InvalidPattern(String),
     #[error("Lexer error: {0}")]
     Lexer(#[from] LexerError),
 
@@ -32,6 +34,15 @@ pub struct Parser {
 }
 
 impl Parser {
+    pub fn validate_pattern(pattern: &str) -> Result<(), ParserError> {
+        if pattern.len() > 16_384 {
+            return Err(ParserError::TooComplex);
+        }
+        regex::Regex::new(pattern)
+            .map(|_| ())
+            .map_err(|error| ParserError::InvalidPattern(error.to_string()))
+    }
+
     pub fn new(tokens: Vec<Token>) -> Self {
         Self { tokens, pos: 0 }
     }
@@ -144,6 +155,7 @@ impl Parser {
             Token::PatternMatch => {
                 self.advance();
                 let pattern = self.parse_string_value()?;
+                Self::validate_pattern(&pattern)?;
                 Ok(QueryExpr::PatternMatch {
                     path,
                     pattern,
@@ -153,6 +165,7 @@ impl Parser {
             Token::NotPatternMatch => {
                 self.advance();
                 let pattern = self.parse_string_value()?;
+                Self::validate_pattern(&pattern)?;
                 Ok(QueryExpr::PatternMatch {
                     path,
                     pattern,

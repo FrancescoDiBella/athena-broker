@@ -34,6 +34,7 @@ pub fn create_router(state: AppState) -> Router {
             "/ngsi-ld/v1/entities/:entity_id",
             get(entities::get_entity_by_id)
                 .patch(entities::update_entity)
+                .put(entities::replace_entity)
                 .delete(entities::delete_entity),
         )
         // Entity Attributes
@@ -43,7 +44,9 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/ngsi-ld/v1/entities/:entity_id/attrs/:attr_id",
-            delete(attrs::delete_attr),
+            delete(attrs::delete_attr)
+                .patch(attrs::partial_attr)
+                .put(attrs::replace_attr),
         )
         // Batch Operations
         .route(

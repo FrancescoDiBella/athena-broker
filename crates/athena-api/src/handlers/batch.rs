@@ -9,18 +9,23 @@ use serde_json::Value;
 use crate::state::AppState;
 use athena_model::{BatchOperationResult, Entity, ProblemDetails};
 
-pub async fn batch_create(State(state): State<AppState>, Json(payload): Json<Value>) -> Response {
-    let arr = match payload.as_array() {
-        Some(a) => a,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ProblemDetails::bad_request_data(
-                    "Batch payload must be a JSON array of entities",
-                )),
-            )
-                .into_response();
+fn items(payload: &Value) -> Result<&[Value], ProblemDetails> {
+    match payload.as_array() {
+        Some(items)
+            if !items.is_empty() && items.len() <= 1000 && !items.iter().any(Value::is_null) =>
+        {
+            Ok(items)
         }
+        _ => Err(ProblemDetails::bad_request_data(
+            "Batch payload requires 1..1000 non-null items",
+        )),
+    }
+}
+
+pub async fn batch_create(State(state): State<AppState>, Json(payload): Json<Value>) -> Response {
+    let arr = match items(&payload) {
+        Ok(arr) => arr,
+        Err(problem) => return (StatusCode::BAD_REQUEST, Json(problem)).into_response(),
     };
 
     let mut entities = Vec::new();
@@ -69,17 +74,9 @@ pub async fn batch_create(State(state): State<AppState>, Json(payload): Json<Val
 }
 
 pub async fn batch_upsert(State(state): State<AppState>, Json(payload): Json<Value>) -> Response {
-    let arr = match payload.as_array() {
-        Some(a) => a,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ProblemDetails::bad_request_data(
-                    "Batch payload must be a JSON array of entities",
-                )),
-            )
-                .into_response();
-        }
+    let arr = match items(&payload) {
+        Ok(arr) => arr,
+        Err(problem) => return (StatusCode::BAD_REQUEST, Json(problem)).into_response(),
     };
 
     let mut entities = Vec::new();
@@ -126,17 +123,9 @@ pub async fn batch_upsert(State(state): State<AppState>, Json(payload): Json<Val
 }
 
 pub async fn batch_update(State(state): State<AppState>, Json(payload): Json<Value>) -> Response {
-    let arr = match payload.as_array() {
-        Some(a) => a,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ProblemDetails::bad_request_data(
-                    "Batch payload must be a JSON array of entities",
-                )),
-            )
-                .into_response();
-        }
+    let arr = match items(&payload) {
+        Ok(arr) => arr,
+        Err(problem) => return (StatusCode::BAD_REQUEST, Json(problem)).into_response(),
     };
 
     let mut entities = Vec::new();
@@ -183,22 +172,23 @@ pub async fn batch_update(State(state): State<AppState>, Json(payload): Json<Val
 }
 
 pub async fn batch_delete(State(state): State<AppState>, Json(payload): Json<Value>) -> Response {
-    let ids: Vec<String> = match payload.as_array() {
-        Some(arr) => arr
-            .iter()
-            .filter_map(Value::as_str)
-            .map(String::from)
-            .collect(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ProblemDetails::bad_request_data(
-                    "Payload must be an array of entity IDs",
-                )),
-            )
-                .into_response();
-        }
+    let arr = match items(&payload) {
+        Ok(arr) => arr,
+        Err(problem) => return (StatusCode::BAD_REQUEST, Json(problem)).into_response(),
     };
+    if !arr
+        .iter()
+        .all(|v| v.as_str().is_some_and(athena_model::attributes::valid_uri))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ProblemDetails::bad_request_data(
+                "Every batch-delete item must be an absolute entity URI",
+            )),
+        )
+            .into_response();
+    }
+    let ids: Vec<String> = arr.iter().map(|v| v.as_str().unwrap().to_owned()).collect();
 
     let result = match state.entity_repo.batch_delete(&ids).await {
         Ok(res) => res,

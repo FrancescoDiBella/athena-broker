@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query, RawQuery, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -13,6 +13,17 @@ use athena_model::{AggrMethod, ProblemDetails, TemporalQuery, TimeProperty, Time
 
 #[derive(Debug, Deserialize)]
 pub struct TemporalQueryRequest {
+    pub q: Option<String>,
+    #[serde(rename = "idPattern")]
+    pub id_pattern: Option<String>,
+    pub georel: Option<String>,
+    pub geometry: Option<String>,
+    pub coordinates: Option<String>,
+    pub geoproperty: Option<String>,
+    pub count: Option<bool>,
+    pub local: Option<bool>,
+    #[serde(rename = "splitEntities")]
+    pub split_entities: Option<bool>,
     pub timerel: Option<String>,
     #[serde(rename = "timeAt")]
     pub time_at: Option<String>,
@@ -143,9 +154,10 @@ pub async fn query_temporal_entity_by_id(
 
 pub async fn query_temporal_entities(
     State(state): State<AppState>,
+    RawQuery(raw_query): RawQuery,
     Query(params): Query<TemporalQueryRequest>,
 ) -> Response {
-    let query = match build_temporal_query(&params) {
+    let query = match build_temporal_collection_query(&params) {
         Ok(q) => q,
         Err(err_resp) => return err_resp,
     };
@@ -155,59 +167,84 @@ pub async fn query_temporal_entities(
         .as_ref()
         .map(|s| s.split(',').map(str::trim).map(String::from).collect());
 
-    if let Some(ref entity_id) = params.id {
+    let limit = params.limit.unwrap_or(20);
+    let offset = params.offset.unwrap_or(0);
+    if limit > 1000 || (limit == 0 && params.count != Some(true)) || offset > i64::MAX as usize {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ProblemDetails::bad_request_data(
+                "limit must be 1..1000, or 0 with count=true; offset must fit a signed 64-bit integer",
+            )),
+        )
+            .into_response();
+    }
+    let mut headers = HeaderMap::new();
+    {
         match state
             .temporal_repo
-            .query_temporal(entity_id, filter_attrs.as_deref(), &query)
+            .count_temporal_entities(params.r#type.as_deref(), filter_attrs.as_deref(), &query)
             .await
         {
-            Ok(res) => (StatusCode::OK, Json(vec![res])).into_response(),
-            Err(athena_storage::StorageError::Problem(problem)) => {
-                let status = problem
-                    .status
-                    .and_then(|s| StatusCode::from_u16(s).ok())
-                    .unwrap_or(StatusCode::BAD_REQUEST);
-                (status, Json(problem)).into_response()
+            Ok(count) => {
+                if params.count == Some(true) {
+                    headers.insert(
+                        "NGSILD-Results-Count",
+                        HeaderValue::from_str(&count.to_string()).unwrap(),
+                    );
+                }
+                crate::handlers::pagination::links(
+                    &mut headers,
+                    "/ngsi-ld/v1/temporal/entities",
+                    raw_query.as_deref(),
+                    limit as i64,
+                    offset as i64,
+                    count,
+                );
             }
-            Err(athena_storage::StorageError::EntityNotFound(id)) => (
-                StatusCode::NOT_FOUND,
-                Json(ProblemDetails::not_found(format!("Entity {id} not found"))),
-            )
-                .into_response(),
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ProblemDetails::internal_error(e.to_string())),
-            )
-                .into_response(),
+            Err(error) => return crate::handlers::attrs::mutation_response::<()>(Err(error)),
         }
-    } else {
-        let limit = params.limit.unwrap_or(20);
-        let offset = params.offset.unwrap_or(0);
-        let entity_type = params.r#type.as_deref();
-
-        match state
-            .temporal_repo
-            .query_temporal_entities(entity_type, filter_attrs.as_deref(), &query, limit, offset)
-            .await
-        {
-            Ok(res) => (StatusCode::OK, Json(res)).into_response(),
-            Err(athena_storage::StorageError::Problem(problem)) => {
-                let status = problem
-                    .status
-                    .and_then(|s| StatusCode::from_u16(s).ok())
-                    .unwrap_or(StatusCode::BAD_REQUEST);
-                (status, Json(problem)).into_response()
-            }
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ProblemDetails::internal_error(e.to_string())),
-            )
-                .into_response(),
-        }
+    }
+    match state
+        .temporal_repo
+        .query_temporal_entities(
+            params.r#type.as_deref(),
+            filter_attrs.as_deref(),
+            &query,
+            limit,
+            offset,
+        )
+        .await
+    {
+        Ok(results) => (StatusCode::OK, headers, Json(results)).into_response(),
+        Err(error) => crate::handlers::attrs::mutation_response::<()>(Err(error)),
     }
 }
 
+fn build_temporal_collection_query(
+    params: &TemporalQueryRequest,
+) -> Result<TemporalQuery, Response> {
+    // ETSI 5.7.4.4 requires an explicit temporal query for the collection
+    // operation. Keep retrieval by resource ID's optional-query behavior separate.
+    if params.timerel.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ProblemDetails::bad_request_data(
+                "timerel and timeAt are required for temporal collection queries",
+            )),
+        )
+            .into_response());
+    }
+    build_temporal_query(params)
+}
+
 fn build_temporal_query(params: &TemporalQueryRequest) -> Result<TemporalQuery, Response> {
+    if params.local == Some(false) || params.split_entities == Some(true) {
+        let mut problem = ProblemDetails::bad_request_data(
+            "Temporal federation is not implemented; use local=true for local history",
+        );
+        problem.status = Some(501);
+        return Err((StatusCode::NOT_IMPLEMENTED, Json(problem)).into_response());
+    }
     let timerel_str = match &params.timerel {
         Some(t) => t.to_lowercase(),
         None => "after".to_string(),
@@ -268,6 +305,15 @@ fn build_temporal_query(params: &TemporalQueryRequest) -> Result<TemporalQuery, 
     };
 
     if timerel == TimeRel::Between {
+        if end_time_at.is_none() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ProblemDetails::bad_request_data(
+                    "endTimeAt is required with timerel=between",
+                )),
+            )
+                .into_response());
+        }
         if let Some(ref end) = end_time_at {
             if time_at > *end {
                 return Err((
@@ -284,6 +330,7 @@ fn build_temporal_query(params: &TemporalQueryRequest) -> Result<TemporalQuery, 
     let timeproperty = match params.timeproperty.as_deref() {
         Some("createdAt") => TimeProperty::CreatedAt,
         Some("modifiedAt") => TimeProperty::ModifiedAt,
+        Some("deletedAt") => TimeProperty::DeletedAt,
         None | Some("observedAt") => TimeProperty::ObservedAt,
         Some(_) => {
             return Err((
@@ -331,7 +378,45 @@ fn build_temporal_query(params: &TemporalQueryRequest) -> Result<TemporalQuery, 
             }
         }
     }
+    let geo_q = athena_query::GeoQueryParser::parse(
+        params.georel.as_deref(),
+        params.geometry.as_deref(),
+        params.coordinates.as_deref(),
+        params.geoproperty.as_deref(),
+    )
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ProblemDetails::bad_request_data(e.to_string())),
+        )
+            .into_response()
+    })?;
+    if let Some(q) = &params.q {
+        athena_query::Parser::parse_str(q).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ProblemDetails::bad_request_data(e.to_string())),
+            )
+                .into_response()
+        })?;
+    }
+    if let Some(pattern) = &params.id_pattern {
+        athena_query::Parser::validate_pattern(pattern).map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ProblemDetails::bad_request_data(error.to_string())),
+            )
+                .into_response()
+        })?;
+    }
     Ok(TemporalQuery {
+        ids: params
+            .id
+            .as_ref()
+            .map(|ids| ids.split(',').map(str::to_owned).collect()),
+        id_pattern: params.id_pattern.clone(),
+        q: params.q.clone(),
+        geo_q,
         timerel,
         time_at,
         end_time_at,
@@ -486,4 +571,56 @@ pub async fn update_temporal_instance(
             .update_temporal_instance(&id, &attribute, &instance, &patch)
             .await,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn collection_requires_a_complete_temporal_query() {
+        for input in [
+            json!({}),
+            json!({"timeAt": "2000-01-01T00:00:00Z"}),
+            json!({"endTimeAt": "2000-01-02T00:00:00Z"}),
+            json!({"timeproperty": "createdAt"}),
+            json!({"lastN": 1}),
+            json!({"timerel": "before"}),
+            json!({"timerel": "between", "timeAt": "2000-01-01T00:00:00Z"}),
+        ] {
+            let params = serde_json::from_value(input.clone()).unwrap();
+            let response = build_temporal_collection_query(&params).unwrap_err();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{input}");
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let problem: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                problem["type"],
+                "https://uri.etsi.org/ngsi-ld/errors/BadRequestData"
+            );
+        }
+    }
+
+    #[test]
+    fn collection_accepts_explicit_intervals_and_optional_timeproperty() {
+        for relation in ["before", "after", "between"] {
+            let mut input = json!({"timerel": relation, "timeAt": "2000-01-01T00:00:00Z"});
+            if relation == "between" {
+                input["endTimeAt"] = json!("2000-01-02T00:00:00Z");
+            }
+            let params = serde_json::from_value(input).unwrap();
+            let query = build_temporal_collection_query(&params).unwrap();
+            assert_eq!(query.timeproperty, TimeProperty::ObservedAt);
+        }
+    }
+
+    #[test]
+    fn resource_id_retrieval_keeps_its_optional_temporal_query() {
+        let params = serde_json::from_value(json!({})).unwrap();
+        let query = build_temporal_query(&params).unwrap();
+        assert_eq!(query.timerel, TimeRel::After);
+        assert_eq!(query.time_at, DateTime::UNIX_EPOCH);
+    }
 }

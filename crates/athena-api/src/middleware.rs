@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 #[derive(Clone, Debug, Default)]
 pub struct RequestContext {
     pub context_uri: Option<String>,
+    pub body_context: Option<Value>,
 }
 fn problem(status: StatusCode, message: impl Into<String>) -> Response {
     let mut detail = ProblemDetails::bad_request_data(message);
@@ -83,16 +84,9 @@ pub async fn ngsi_ld_headers_middleware(
     let mut links = Vec::new();
     for value in request.headers().get_all(header::LINK) {
         if let Ok(text) = value.to_str() {
-            for segment in text.split(", <") {
-                let segment = if segment.starts_with('<') {
-                    segment.to_owned()
-                } else {
-                    format!("<{segment}")
-                };
-                if let Some(link) = LinkHeader::parse(&segment) {
-                    if link.rel == athena_model::JSON_LD_CONTEXT_REL {
-                        links.push(link.uri);
-                    }
+            for link in LinkHeader::parse_list(text) {
+                if link.rel == athena_model::JSON_LD_CONTEXT_REL {
+                    links.push(link.uri);
                 }
             }
         }
@@ -105,6 +99,7 @@ pub async fn ngsi_ld_headers_middleware(
     }
     let context_uri = links.pop();
     let output_context = json!(context_uri.as_deref().unwrap_or(ETSI_CORE_CONTEXT_URL));
+    let mut body_context = None;
     let path = request.uri().path().to_owned();
     let entity_document = path.contains("/entities") || path.contains("/entityOperations/");
     let is_delete = path.ends_with("entityOperations/delete");
@@ -189,6 +184,7 @@ pub async fn ngsi_ld_headers_middleware(
                 continue;
             }
             let context = item.get("@context").cloned();
+            body_context = context.clone();
             if input_ld && context.is_none() {
                 return problem(
                     StatusCode::BAD_REQUEST,
@@ -258,6 +254,7 @@ pub async fn ngsi_ld_headers_middleware(
     }
     request.extensions_mut().insert(RequestContext {
         context_uri: context_uri.clone(),
+        body_context,
     });
     let mut response = next.run(request).await;
     response
@@ -313,7 +310,28 @@ pub async fn ngsi_ld_headers_middleware(
                     .compact(item.clone(), output_context.clone())
                     .await
                 {
-                    Ok(compact) => *item = compact,
+                    Ok(mut compact) => {
+                        // JSON-LD compaction collapses singleton sets. Temporal attribute
+                        // histories are arrays even when only one instance is selected.
+                        if path.starts_with("/ngsi-ld/v1/temporal/entities") {
+                            if let Some(object) = compact.as_object_mut() {
+                                for (key, value) in object {
+                                    if !matches!(
+                                        key.as_str(),
+                                        "id" | "type"
+                                            | "@context"
+                                            | "scope"
+                                            | "createdAt"
+                                            | "modifiedAt"
+                                    ) && !value.is_array()
+                                    {
+                                        *value = Value::Array(vec![value.take()]);
+                                    }
+                                }
+                            }
+                        }
+                        *item = compact;
+                    }
                     Err(e) => {
                         return problem(
                             StatusCode::INTERNAL_SERVER_ERROR,
@@ -345,7 +363,7 @@ pub async fn ngsi_ld_headers_middleware(
             &LinkHeader::new_context(context_uri.unwrap_or_else(|| ETSI_CORE_CONTEXT_URL.into()))
                 .to_header_value(),
         ) {
-            response.headers_mut().insert(header::LINK, value);
+            response.headers_mut().append(header::LINK, value);
         }
     }
     response

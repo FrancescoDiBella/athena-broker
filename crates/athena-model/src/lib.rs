@@ -4,7 +4,9 @@ pub mod csource;
 pub mod entity;
 pub mod error;
 pub mod geoproperty;
+pub mod geoquery;
 pub mod headers;
+pub mod mutation;
 pub mod property;
 pub mod relationship;
 pub mod subscription;
@@ -18,6 +20,7 @@ pub use geoproperty::{GeoProperty, Geometry};
 pub use headers::{
     LinkHeader, APPLICATION_JSON, APPLICATION_LD_JSON, ETSI_CORE_CONTEXT_URL, JSON_LD_CONTEXT_REL,
 };
+pub use mutation::{AttributeOperation, UpdateResult};
 pub use property::Property;
 pub use relationship::Relationship;
 pub use subscription::{

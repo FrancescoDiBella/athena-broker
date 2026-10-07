@@ -26,7 +26,8 @@ impl GeoQueryParser {
         coordinates: Option<&str>,
         geoproperty: Option<&str>,
     ) -> Result<Option<GeoQuery>, GeoParserError> {
-        if georel.is_none() && geometry.is_none() && coordinates.is_none() {
+        if georel.is_none() && geometry.is_none() && coordinates.is_none() && geoproperty.is_none()
+        {
             return Ok(None);
         }
 
@@ -71,12 +72,16 @@ impl GeoQueryParser {
         let parts: Vec<&str> = georel.split(';').map(str::trim).collect();
         let primary = parts[0].to_lowercase();
 
+        if primary != "near" && parts.len() != 1 {
+            return Err(GeoParserError::InvalidGeorel(georel.into()));
+        }
         match primary.as_str() {
             "within" => Ok(GeoRel::Within),
             "contains" => Ok(GeoRel::Contains),
             "intersects" => Ok(GeoRel::Intersects),
             "disjoint" => Ok(GeoRel::Disjoint),
             "equals" => Ok(GeoRel::Equals),
+            "overlaps" => Ok(GeoRel::Overlaps),
             "near" => {
                 let mut max_distance = None;
                 let mut min_distance = None;

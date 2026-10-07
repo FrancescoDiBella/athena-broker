@@ -14,6 +14,8 @@ use athena_storage::{EntityQueryParams, StorageError};
 
 #[derive(Debug, Deserialize)]
 pub struct EntityQueryRequest {
+    #[serde(rename = "splitEntities")]
+    pub split_entities: Option<bool>,
     pub local: Option<bool>,
     pub id: Option<String>,
     #[serde(rename = "idPattern")]
@@ -141,7 +143,18 @@ pub async fn query_entities(
     RawQuery(raw_query): RawQuery,
     Query(query): Query<EntityQueryRequest>,
 ) -> Response {
-    if query.limit.is_some_and(|v| !(0..=1000).contains(&v)) || query.offset.is_some_and(|v| v < 0)
+    if let Some(pattern) = &query.id_pattern {
+        if let Err(error) = Parser::validate_pattern(pattern) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ProblemDetails::bad_request_data(error.to_string())),
+            )
+                .into_response();
+        }
+    }
+    if query.limit.is_some_and(|v| !(0..=1000).contains(&v))
+        || query.offset.is_some_and(|v| v < 0)
+        || (query.limit == Some(0) && query.count != Some(true))
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -201,20 +214,16 @@ pub async fn query_entities(
     };
 
     let mut headers = HeaderMap::new();
-    if query.count.unwrap_or(false) {
-        if let Ok(count) = state.entity_repo.count_entities(&params).await {
-            if let Ok(val) = HeaderValue::from_str(&count.to_string()) {
-                headers.insert("NGSILD-Results-Count", val);
-            }
-        }
-    }
-
     let result = if query.local.unwrap_or(false) {
-        state
-            .entity_repo
-            .query_entities(&params)
-            .await
-            .map_err(|e| e.to_string())
+        match state.entity_repo.count_entities(&params).await {
+            Ok(count) => state
+                .entity_repo
+                .query_entities(&params)
+                .await
+                .map(|entities| crate::federation::FederatedResult { entities, count })
+                .map_err(|e| e.to_string()),
+            Err(error) => Err(error.to_string()),
+        }
     } else {
         state
             .federation_service
@@ -223,11 +232,27 @@ pub async fn query_entities(
                 &state.csource_repo,
                 &params,
                 raw_query.as_deref(),
+                query.split_entities.unwrap_or(false),
             )
             .await
     };
     match result {
-        Ok(entities) => {
+        Ok(result) => {
+            crate::handlers::pagination::links(
+                &mut headers,
+                "/ngsi-ld/v1/entities",
+                raw_query.as_deref(),
+                params.limit.unwrap_or(20),
+                params.offset.unwrap_or(0),
+                result.count,
+            );
+            if query.count.unwrap_or(false) {
+                headers.insert(
+                    "NGSILD-Results-Count",
+                    HeaderValue::from_str(&result.count.to_string()).unwrap(),
+                );
+            }
+            let entities = result.entities;
             let is_key_values = query
                 .options
                 .as_deref()
@@ -252,11 +277,16 @@ pub async fn query_entities(
 
             (StatusCode::OK, headers, Json(list)).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ProblemDetails::internal_error(e.to_string())),
-        )
-            .into_response(),
+        Err(e) => {
+            let status = if query.local.unwrap_or(false) {
+                StatusCode::INTERNAL_SERVER_ERROR
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            let mut problem = ProblemDetails::internal_error(e);
+            problem.status = Some(status.as_u16());
+            (status, Json(problem)).into_response()
+        }
     }
 }
 
@@ -312,6 +342,16 @@ pub async fn update_entity(
         )
             .into_response(),
     }
+}
+
+pub async fn replace_entity(
+    State(state): State<AppState>,
+    Path(entity_id): Path<String>,
+    Json(payload): Json<Value>,
+) -> Response {
+    crate::handlers::attrs::mutation_response(
+        state.entity_repo.replace_entity(&entity_id, &payload).await,
+    )
 }
 
 pub async fn delete_entity(

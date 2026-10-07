@@ -91,20 +91,7 @@ impl Entity {
 
         let context = obj.get("@context").cloned();
 
-        let scope = obj.get("scope").and_then(|v| {
-            if let Some(arr) = v.as_array() {
-                Some(
-                    arr.iter()
-                        .filter_map(Value::as_str)
-                        .map(String::from)
-                        .collect(),
-                )
-            } else if let Some(s) = v.as_str() {
-                Some(vec![s.to_string()])
-            } else {
-                None
-            }
-        });
+        let scope = obj.get("scope").map(parse_scope).transpose()?;
 
         let created_at = obj
             .get("createdAt")
@@ -272,4 +259,29 @@ impl Entity {
             .get(name)
             .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
+}
+
+pub fn parse_scope(value: &Value) -> Result<Vec<String>, ModelError> {
+    let values = value
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| vec![value.clone()]);
+    if values.is_empty()
+        || values.len() > 1000
+        || values.iter().any(|v| {
+            !v.as_str().is_some_and(|scope| {
+                scope.starts_with('/')
+                    && !scope.chars().any(|c| c.is_whitespace() || c.is_control())
+            })
+        })
+    {
+        return Err(ProblemDetails::bad_request_data(
+            "scope requires nonempty absolute scope paths",
+        )
+        .into());
+    }
+    Ok(values
+        .into_iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect())
 }

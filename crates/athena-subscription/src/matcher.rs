@@ -33,18 +33,18 @@ impl SubscriptionMatcher {
                 negated,
             } => {
                 let entity_val = Self::get_attribute_value(entity, path);
-                let matched = if let Some(Value::String(s)) = entity_val {
-                    Regex::new(pattern)
-                        .map(|re| re.is_match(&s))
-                        .unwrap_or(false)
-                } else {
-                    false
+                let values = match entity_val {
+                    Some(Value::Array(values)) => values,
+                    Some(value) => vec![value],
+                    None => vec![],
                 };
-                if *negated {
-                    !matched
-                } else {
-                    matched
-                }
+                let Ok(regex) = Regex::new(pattern) else {
+                    return false;
+                };
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|value| regex.is_match(value) != *negated)
             }
             QueryExpr::Range { path, min, max } => {
                 let entity_val = Self::get_attribute_value(entity, path);

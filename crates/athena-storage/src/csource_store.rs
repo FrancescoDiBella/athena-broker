@@ -136,7 +136,7 @@ impl CsourceRepository for PgCsourceStore {
                    context_source_info, ST_AsGeoJSON(location) as location_geojson,
                    expires_at, status, created_at, modified_at
             FROM csource_registrations
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, id ASC
             LIMIT $1 OFFSET $2
             "#,
         )
@@ -248,11 +248,22 @@ impl CsourceRepository for PgCsourceStore {
         entity_id: Option<&str>,
         attrs: Option<&[String]>,
     ) -> Result<Vec<CsourceRegistration>, StorageError> {
-        let all_active = self.list_csources(None, None, Some(1000), Some(0)).await?;
-        let filtered: Vec<CsourceRegistration> = all_active
-            .into_iter()
-            .filter(|csr| csr.matches_entity_query(entity_type, entity_id, attrs))
-            .collect();
-        Ok(filtered)
+        let mut matching = Vec::new();
+        let mut offset = 0;
+        loop {
+            let page = self
+                .list_csources(None, None, Some(100), Some(offset))
+                .await?;
+            let size = page.len();
+            matching.extend(
+                page.into_iter()
+                    .filter(|csr| csr.matches_entity_query(entity_type, entity_id, attrs)),
+            );
+            if size < 100 {
+                break;
+            }
+            offset += size as i64;
+        }
+        Ok(matching)
     }
 }
